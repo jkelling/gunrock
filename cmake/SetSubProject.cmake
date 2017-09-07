@@ -34,7 +34,8 @@ CUDA_ADD_EXECUTABLE(${PROJECT_NAME}
 # end /* Add CUDA executables */
 
 # begin /* Link Metis and Boost */
-target_link_libraries(${PROJECT_NAME} ${Boost_LIBRARIES})
+link_directories(${CUDA_TOOLKIT_ROOT_DIR}/lib64)
+target_link_libraries(${PROJECT_NAME} ${Boost_LIBRARIES} cudadevrt nvToolsExt)
 if (METIS_LIBRARY)
   target_link_libraries(${PROJECT_NAME} ${METIS_LIBRARY})
 endif()

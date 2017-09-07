@@ -53,6 +53,40 @@ using namespace gunrock::util;
 using namespace gunrock::oprtr;
 using namespace gunrock::app::sssp;
 
+/*
+ *  NVVP Code Instrumentation
+ */
+
+#define USE_NVTX
+#ifdef USE_NVTX
+  #include "nvToolsExt.h"
+  const uint32_t colors[] = { 0x0000ff00, 0x000000ff, 0x00ffff00, 0x00ff00ff,
+    0x0000ffff, 0x00ff0000, 0x00ffffff };
+  const int num_colors = sizeof(colors)/sizeof(uint32_t);
+ 
+  #define PUSH_NVTX(name,cid) { \
+  int color_id = cid; \
+    color_id = color_id%num_colors;\
+    nvtxEventAttributes_t eventAttrib = {0}; \
+    eventAttrib.version = NVTX_VERSION; \
+    eventAttrib.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE; \
+    eventAttrib.colorType = NVTX_COLOR_ARGB; \
+    eventAttrib.color = colors[color_id]; \
+    eventAttrib.messageType = NVTX_MESSAGE_TYPE_ASCII; \
+    eventAttrib.message.ascii = name; \
+    nvtxRangePushEx(&eventAttrib); \
+  }
+
+  #define POP_NVTX nvtxRangePop();
+#else //USE_NVTX
+  #define PUSH_NVTX(name,cid)
+  #define POP_NVTX
+#endif //USE_NVTX
+
+/*
+ *  END NVVP Code Instrumentation
+ */
+
 /******************************************************************************
  * Housekeeping Routines
  ******************************************************************************/
@@ -546,6 +580,7 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
     // compute reference CPU SSSP solution for source-distance
     if (!quick_mode)
     {
+		PUSH_NVTX("CPU SSSP",2);
         if (!quiet_mode) { printf("Computing reference value ...\n"); }
         ReferenceSssp<VertexId, SizeT, Value, MARK_PREDECESSORS>(
             *graph,
@@ -554,6 +589,7 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
             src,
             quiet_mode);
         if (!quiet_mode) { printf("\n"); }
+		POP_NVTX;
     }
 
     cpu_timer.Start();
