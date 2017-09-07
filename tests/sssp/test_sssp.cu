@@ -16,6 +16,8 @@
 #include <string>
 #include <deque>
 #include <vector>
+#include <future>
+#include <sstream>
 #include <iostream>
 
 // Utilities and correctness-checking
@@ -342,7 +344,12 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
 
     // TODO: remove after merge mgpu-cq
     ContextPtr   *context = (ContextPtr*)  info->context;
-    cudaStream_t *streams = (cudaStream_t*)info->streams;
+
+	static const int NREPL = 2;
+    //cudaStream_t *streams = (cudaStream_t*)info->streams;
+	std::vector<cudaStream_t> streams(num_gpus*2*NREPL);
+	for(auto& s : streams)
+		cudaStreamCreate(&s);
 
     // Allocate host-side array (for both reference and GPU-computed results)
     Value    *reference_labels      = new Value[graph->nodes];
@@ -362,41 +369,80 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
     }
 
     // Allocate problem on GPU
-    Problem *problem = new Problem;
-    if (retval = util::GRError(problem->Init(
-        stream_from_host,
-        graph,
-        NULL,
-        num_gpus,
-        gpu_idx,
-        partition_method,
-        streams,
-        delta_factor,
-        max_queue_sizing,
-        max_in_sizing,
-        partition_factor,
-        partition_seed),
-        "SSSP Problem Init failed", __FILE__, __LINE__))
-        return retval;
+//    Problem *problem = new Problem;
+//    if (retval = util::GRError(problem->Init(
+//        stream_from_host,
+//        graph,
+//        NULL,
+//        num_gpus,
+//        gpu_idx,
+//        partition_method,
+//        &streams[0],
+//        delta_factor,
+//        max_queue_sizing,
+//        max_in_sizing,
+//        partition_factor,
+//        partition_seed),
+//        "SSSP Problem Init failed", __FILE__, __LINE__))
+//        return retval;
+
+	std::vector<Problem *> problems(NREPL);
+	for(int a = 0; a < NREPL; ++a)
+	{
+		problems[a] = new Problem;
+		if (retval = util::GRError(problems[a]->Init(
+			stream_from_host,
+			graph,
+			NULL,
+			num_gpus,
+			gpu_idx,
+			partition_method,
+			&streams[2*num_gpus*a],
+			delta_factor,
+			max_queue_sizing,
+			max_in_sizing,
+			partition_factor,
+			partition_seed),
+			"SSSP Problem Init failed", __FILE__, __LINE__))
+			return retval;
+	}
 
     // Allocate SSSP enactor map
-    Enactor* enactor = new Enactor(
-        num_gpus, gpu_idx, instrument, debug, size_check);
-    if (retval = util::GRError(enactor->Init(
-        context, problem, max_grid_size, traversal_mode),
-        "SSSP Enactor Init failed", __FILE__, __LINE__))
-        return retval;
+//    Enactor* enactor = new Enactor(
+//        num_gpus, gpu_idx, instrument, debug, size_check);
+//    if (retval = util::GRError(enactor->Init(
+//        context, problem, max_grid_size, traversal_mode),
+//        "SSSP Enactor Init failed", __FILE__, __LINE__))
+//        return retval;
+//
+//    enactor -> communicate_latency = communicate_latency;
+//    enactor -> communicate_multipy = communicate_multipy;
+//    enactor -> expand_latency      = expand_latency;
+//    enactor -> subqueue_latency    = subqueue_latency;
+//    enactor -> fullqueue_latency   = fullqueue_latency;
+//    enactor -> makeout_latency     = makeout_latency;
 
-    enactor -> communicate_latency = communicate_latency;
-    enactor -> communicate_multipy = communicate_multipy;
-    enactor -> expand_latency      = expand_latency;
-    enactor -> subqueue_latency    = subqueue_latency;
-    enactor -> fullqueue_latency   = fullqueue_latency;
-    enactor -> makeout_latency     = makeout_latency;
+	std::vector<Enactor *> enactors(NREPL);
+	for(int a = 0; a < NREPL; ++a)
+	{
+		enactors[a] = new Enactor(
+			num_gpus, gpu_idx, instrument, debug, size_check);
+		if (retval = util::GRError(enactors[a]->Init(
+			context, problems[a], max_grid_size, traversal_mode),
+			"SSSP Enactor Init failed", __FILE__, __LINE__))
+			return retval;
+
+		enactors[a] -> communicate_latency = communicate_latency;
+		enactors[a] -> communicate_multipy = communicate_multipy;
+		enactors[a] -> expand_latency      = expand_latency;
+		enactors[a] -> subqueue_latency    = subqueue_latency;
+		enactors[a] -> fullqueue_latency   = fullqueue_latency;
+		enactors[a] -> makeout_latency     = makeout_latency;
+	}
 
     if (retval = util::SetDevice(gpu_idx[0])) return retval;
     if (retval = util::latency::Test(
-        streams[0], problem -> data_slices[0] -> latency_data,
+        streams[0], problems[0] -> data_slices[0] -> latency_data,
         communicate_latency,
         communicate_multipy,
         expand_latency,
@@ -434,15 +480,18 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
             }
         }
 
-        if (retval = util::GRError(problem->Reset(
-            src, enactor->GetFrontierType(),
-            max_queue_sizing, max_queue_sizing1),
-            "SSSP Problem Data Reset Failed", __FILE__, __LINE__))
-            return retval;
+		for(int a = 0; a < NREPL; ++a)
+		{
+			if (retval = util::GRError(problems[a]->Reset(
+				src, enactors[a]->GetFrontierType(),
+				max_queue_sizing, max_queue_sizing1),
+				"SSSP Problem Data Reset Failed", __FILE__, __LINE__))
+				return retval;
 
-        if (retval = util::GRError(enactor->Reset(),
-            "SSSP Enactor Reset failed", __FILE__, __LINE__))
-            return retval;
+			if (retval = util::GRError(enactors[a]->Reset(),
+				"SSSP Enactor Reset failed", __FILE__, __LINE__))
+				return retval;
+		}
 
         for (int gpu = 0; gpu < num_gpus; gpu++)
         {
@@ -458,10 +507,23 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
             printf("__________________________\n"); fflush(stdout);
         }
         cpu_timer.Start();
-        if (retval = util::GRError(enactor->Enact(src, traversal_mode),
-            "SSSP Problem Enact Failed", __FILE__, __LINE__))
-            return retval;
+		std::vector<std::future< decltype(enactors[0]->Enact(src, traversal_mode)) > > futures;
+		futures.reserve(NREPL);
+		for(int a = 0; a < NREPL; ++a)
+			futures.emplace_back(std::async(std::launch::async,
+				[src, traversal_mode](Enactor* enactor){return enactor->Enact(src, traversal_mode);}, enactors[a]));
+		std::vector<decltype(enactors[0]->Enact(src, traversal_mode))> enactRetvals(NREPL); 
+		for(int a = 0; a < NREPL; ++a)
+			enactRetvals[a] = futures[a].get();
         cpu_timer.Stop();
+		for(int a = 0; a < NREPL; ++a)
+        {
+			std::ostringstream os;
+			os << "SSSP[" << a << "] Problem Enact Failed";
+			if (retval = util::GRError(enactRetvals[a],
+				os.str().c_str(), __FILE__, __LINE__))
+				return retval;
+		}
         single_elapsed = cpu_timer.ElapsedMillis();
         total_elapsed += single_elapsed;
         process_times.push_back(single_elapsed);
@@ -472,7 +534,7 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
             printf("--------------------------\n"
                 "iteration %d elapsed: %lf ms, src = %lld, #iteration = %lld\n",
                 iter, single_elapsed, (long long)src,
-                (long long)enactor -> enactor_stats -> iteration);
+                (long long)enactors[0] -> enactor_stats -> iteration);
             fflush(stdout);
         }
     }
@@ -496,7 +558,7 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
 
     cpu_timer.Start();
     // Copy out results
-    if (retval = util::GRError(problem->Extract(h_labels, h_preds),
+    if (retval = util::GRError(problems[0]->Extract(h_labels, h_preds),
         "SSSP Problem Data Extraction Failed", __FILE__, __LINE__))
         return retval;
 
@@ -535,7 +597,7 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
     }
 
     info->ComputeTraversalStats(  // compute running statistics
-        enactor->enactor_stats.GetPointer(), total_elapsed, h_labels);
+        enactors[0]->enactor_stats.GetPointer(), total_elapsed, h_labels);
 
     if (!quiet_mode)
     {
@@ -592,27 +654,25 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
 
     if (!quiet_mode)
     {
-        Display_Memory_Usage(num_gpus, gpu_idx, org_size, problem);
+        Display_Memory_Usage(num_gpus, gpu_idx, org_size, problems[0]);
 #ifdef ENABLE_PERFORMANCE_PROFILING
-        Display_Performance_Profiling(enactor);
+        Display_Performance_Profiling(enactors[0]);
 #endif
     }
 
     // Clean up
     if (org_size        ) {delete[] org_size        ; org_size         = NULL;}
-    if (enactor         )
+	for(int a = 0; a < NREPL; ++a)
     {
-        if (retval = util::GRError(enactor -> Release(),
+        if (retval = util::GRError(enactors[a] -> Release(),
             "BFS Enactor Release failed", __FILE__, __LINE__))
             return retval;
-        delete   enactor         ; enactor          = NULL;
-    }
-    if (problem         )
-    {
-        if (retval = util::GRError(problem -> Release(),
+        delete   enactors[a]         ; //enactor          = NULL;
+
+        if (retval = util::GRError(problems[a] -> Release(),
             "BFS Problem Release failed", __FILE__, __LINE__))
             return retval;
-        delete   problem         ; problem          = NULL;
+        delete   problems[a]         ; //problem          = NULL;
     }
     if (reference_labels) {delete[] reference_labels; reference_labels = NULL;}
     if (h_labels        ) {delete[] h_labels        ; h_labels         = NULL;}
@@ -621,6 +681,12 @@ cudaError_t RunTests(Info<VertexId, SizeT, Value> *info)
     if (gpu_idx         ) {delete[] gpu_idx         ; gpu_idx          = NULL;}
     cpu_timer.Stop();
     info->info["postprocess_time"] = cpu_timer.ElapsedMillis();
+
+	for(auto& s : streams)
+		cudaStreamDestroy(s);
+
+	std::cout << "Enacted " << NREPL << " problems in parallel" << std::endl;
+
     return retval;
 }
 
